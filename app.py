@@ -1,209 +1,390 @@
 # app.py
+
 import streamlit as st
 import pandas as pd
 
-from engine1_text import extract_text_from_pdf, engine1_run
+from engine1_text import (
+    extract_text_from_pdf,
+    engine1_run,
+    base_scores_from_text,  # used in repository tab
+)
 from engine2_context import build_context_features
 from engine3_model import predict_approval_probability
 
+# ---------------------------------------------------------
+# Page config
+# ---------------------------------------------------------
 st.set_page_config(
     page_title="Bayes Plan Checker – Prototype",
     layout="wide",
 )
 
 st.title("Bayes ‘Plan Checker’ System – Prototype")
-st.caption("Engine 0–3 | Multi-document analysis (PS, Committee/Officer, Appeal)")
+st.caption("Engine 0–3 | Multi-document, context-aware planning risk engine")
 
-# ---------------- Sidebar – 파일 업로드 ----------------
-st.sidebar.header("1. Upload planning documents (PDF)")
 
-ps_file = st.sidebar.file_uploader("Planning Statement (PS)", type=["pdf"])
-cr_file = st.sidebar.file_uploader("Committee / Officer Report (CR)", type=["pdf"])
-ap_file = st.sidebar.file_uploader("Appeal Decision (optional)", type=["pdf"])
-other_file = st.sidebar.file_uploader("Other Supporting Doc (optional)", type=["pdf"])
+# ---------------------------------------------------------
+# Initialise session state
+# ---------------------------------------------------------
+for key in [
+    "ps_text",
+    "cr_text",
+    "ap_text",
+    "ps_scores",
+    "cr_scores",
+    "doc_features",
+    "ctx_features",
+    "prediction",
+    "repo_df",
+]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-# ---------------- Sidebar – Context 입력 ----------------
-st.sidebar.header("2. Context / LPA Inputs (Engine 2)")
 
-housing_pressure = st.sidebar.slider(
-    "Housing Pressure (0=low, 3=very high)", 0.0, 3.0, 1.5, 0.5
+# ---------------------------------------------------------
+# Tabs for each Engine + Repository
+# ---------------------------------------------------------
+tab_engine01, tab_engine2, tab_engine3, tab_repo = st.tabs(
+    [
+        "Engine 0 & 1 – Documents",
+        "Engine 2 – Context",
+        "Engine 3 – Output",
+        "Repository / Batch",
+    ]
 )
 
-tb_status = st.sidebar.select_slider(
-    "Tilted Balance Status (TB)",
-    options=[0, 1, 2],
-    value=1,
-    help="0=Not engaged, 1=Arguable, 2=Clearly engaged",
-)
 
-plan_age = st.sidebar.select_slider(
-    "Local Plan Age",
-    options=[0, 1, 2],
-    value=1,
-    help="0=Up-to-date, 1=Mid, 2=Old/out-of-date",
-)
+# =========================================================
+# TAB 1 – ENGINE 0 & 1: Documents (Rulebook + Extraction)
+# =========================================================
+with tab_engine01:
+    st.header("Engine 0 & 1 – Document analysis")
 
-committee_attitude = st.sidebar.slider(
-    "Committee Attitude (0=very restrictive, 3=very permissive)",
-    0.0,
-    3.0,
-    1.5,
-    0.5,
-)
-
-gb_flag = st.sidebar.selectbox(
-    "Green Belt designation?",
-    options=[0, 1],
-    format_func=lambda x: "No" if x == 0 else "Yes",
-)
-
-floodzone_level = st.sidebar.select_slider(
-    "Flood Zone level",
-    options=[0, 1, 2, 3],
-    value=0,
-    help="0=None/1, 2=Zone 2, 3=Zone 3",
-)
-
-run_button = st.sidebar.button("Run full Engine 1–3")
-
-
-# ---------------- 메인 로직 ----------------
-if run_button:
-    if not (ps_file or cr_file):
-        st.error("⚠️ 최소한 Planning Statement 또는 Committee/Officer Report 중 하나는 업로드해야 합니다.")
-        st.stop()
-
-    # 1) 텍스트 추출
-    with st.spinner("Reading PDFs..."):
-        ps_text = extract_text_from_pdf(ps_file) if ps_file else None
-        cr_text = extract_text_from_pdf(cr_file) if cr_file else None
-        ap_text = extract_text_from_pdf(ap_file) if ap_file else None
-
-    # 2) Engine 1
-    with st.spinner("Running Engine 1 – Evidence extraction..."):
-        ps_scores, cr_scores, doc_features = engine1_run(ps_text, cr_text, ap_text)
-
-    # 3) Engine 2
-    ctx_features = build_context_features(
-        housing_pressure=housing_pressure,
-        tb_status=tb_status,
-        plan_age=plan_age,
-        committee_attitude=committee_attitude,
-        gb_flag=gb_flag,
-        floodzone_level=floodzone_level,
+    st.markdown(
+        """
+        **Purpose**  
+        This tab runs Engine 0 (rulebook scoring) and Engine 1 (multi-document analysis).  
+        Upload the documents for the case you want to analyse:
+        - Planning Statement (PS)  
+        - Committee / Officer Report (CR)  
+        - Appeal Decision (optional)
+        """
     )
 
-    # 4) Engine 1 + 2 합치기
-    X_all = {}
-    X_all.update(doc_features)
-    X_all.update(ctx_features)
+    col_ps, col_cr, col_ap = st.columns(3)
 
-    # 5) Engine 3 – 예측
-    with st.spinner("Running Engine 3 – Predictive model..."):
-        pred = predict_approval_probability(X_all)
-        prob = pred["probability"]
-        rating = pred["rating"]
-
-    # ---------------- Summary 카드 ----------------
-    st.subheader("Overall Planning Risk Assessment")
-
-    col_main, col_side = st.columns([2, 1])
-
-    with col_main:
-        st.metric(
-            label="Predicted Approval Probability",
-            value=f"{prob*100:.1f}%",
+    with col_ps:
+        ps_file = st.file_uploader(
+            "Planning Statement (PS)",
+            type=["pdf"],
+            key="ps_uploader",
         )
-        st.write(f"**Risk rating:** :{ 'green_circle' if rating=='Green' else 'orange_circle' if rating=='Amber' else 'red_circle' }: **{rating}**")
-
-        st.progress(min(max(prob, 0.01), 0.99))
-
-    with col_side:
-        st.markdown("**Context snapshot**")
-        st.write(
-            f"""
-            • Housing pressure: `{housing_pressure}`  
-            • Tilted balance: `{tb_status}`  
-            • Plan age: `{plan_age}`  
-            • Committee attitude: `{committee_attitude}`  
-            • Green Belt: `{'Yes' if gb_flag else 'No'}`  
-            • Flood zone: `{floodzone_level}`  
-            """
+    with col_cr:
+        cr_file = st.file_uploader(
+            "Committee / Officer Report (CR)",
+            type=["pdf"],
+            key="cr_uploader",
+        )
+    with col_ap:
+        ap_file = st.file_uploader(
+            "Appeal Decision (optional)",
+            type=["pdf"],
+            key="ap_uploader",
         )
 
-    # ---------------- 탭: Summary / Documents / Context ----------------
-    tab_summary, tab_docs, tab_ctx = st.tabs(["Summary drivers", "Documents comparison", "Context details"])
+    run_engine01 = st.button("Run Engine 0 & 1 on uploaded documents")
 
-    # ---- Tab 1: Summary drivers ----
-    with tab_summary:
-        st.markdown("### Key numerical drivers (X-variables)")
-
-        # 핵심 변수만 테이블로 표시
-        key_vars = [
-            "X1_Heritage_Harm",
-            "X2_Design_Quality",
-            "X3_Amenity_Harm",
-            "X4_Ecology_Harm",
-            "X5_GB_Harm",
-            "X6_Flood_Risk",
-            "X7_Economic_Benefit",
-            "X8_Social_Benefit",
-            "X9_Policy_Compliance",
-            "X10_Spin_Index",
-            "X11_Housing_Pressure",
-            "X12_TB_Status",
-            "X14_Committee_Attitude",
-        ]
-        data = {k: [X_all.get(k, 0)] for k in key_vars}
-        df = pd.DataFrame(data, index=["Value"])
-        st.dataframe(df.T)
-
-        st.markdown("### Interaction effects (Z-variables)")
-        st.json(pred["interactions"])
-
-    # ---- Tab 2: Documents comparison ----
-    with tab_docs:
-        st.markdown("### Document-based scoring (Engine 1)")
-
-        docs_table = []
-
-        def _row(name: str, scores: dict):
-            if not scores:
-                return
-            docs_table.append(
-                {
-                    "Document": name,
-                    "Heritage": scores.get("Heritage_Harm", 0),
-                    "Design": scores.get("Design_Quality", 0),
-                    "Amenity": scores.get("Amenity_Harm", 0),
-                    "Ecology": scores.get("Ecology_Harm", 0),
-                    "GB Harm": scores.get("GB_Harm", 0),
-                    "Flood": scores.get("Flood_Risk", 0),
-                    "Economic": scores.get("Economic_Benefit", 0),
-                    "Social": scores.get("Social_Benefit", 0),
-                    "Policy": scores.get("Policy_Compliance", 0),
-                }
-            )
-
-        _row("Planning Statement", ps_scores)
-        _row("Committee / Officer Report", cr_scores)
-        _row("Appeal Decision", doc_features.get("Appeal_Scores", {}))
-
-        if docs_table:
-            df_docs = pd.DataFrame(docs_table)
-            st.dataframe(df_docs)
-
-            st.markdown("#### Heritage / Design / Benefits comparison")
-            if len(df_docs) > 1:
-                chart_data = df_docs.set_index("Document")[["Heritage", "Design", "Economic", "Social"]]
-                st.bar_chart(chart_data)
+    if run_engine01:
+        if not (ps_file or cr_file):
+            st.error("Please upload at least a Planning Statement or a Committee/Officer Report.")
         else:
-            st.info("No document scores available.")
+            with st.spinner("Reading PDFs and running Engine 0 & 1..."):
+                ps_text = extract_text_from_pdf(ps_file) if ps_file else None
+                cr_text = extract_text_from_pdf(cr_file) if cr_file else None
+                ap_text = extract_text_from_pdf(ap_file) if ap_file else None
 
-    # ---- Tab 3: Context ----
-    with tab_ctx:
-        st.markdown("### Engine 2 – Context inputs")
-        st.json(ctx_features)
+                st.session_state["ps_text"] = ps_text
+                st.session_state["cr_text"] = cr_text
+                st.session_state["ap_text"] = ap_text
 
-else:
-    st.info("👈 왼쪽 사이드바에서 문서 업로드와 컨텍스트 값을 설정한 뒤 **Run full Engine 1–3** 버튼을 눌러줘.")
+                ps_scores, cr_scores, doc_features = engine1_run(ps_text, cr_text, ap_text)
+
+                st.session_state["ps_scores"] = ps_scores
+                st.session_state["cr_scores"] = cr_scores
+                st.session_state["doc_features"] = doc_features
+
+            st.success("Engine 0 & 1 completed for this case.")
+
+    # Show results if available
+    if st.session_state["doc_features"] is not None:
+        st.subheader("Engine 0 & 1 – Outputs for this case")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Planning Statement – Rulebook scores**")
+            if st.session_state["ps_scores"]:
+                st.json(st.session_state["ps_scores"])
+            else:
+                st.info("No Planning Statement uploaded.")
+
+            st.markdown("**Appeal Decision – Scores (if any)**")
+            ap_scores = st.session_state["doc_features"].get("Appeal_Scores", {})
+            if ap_scores:
+                st.json(ap_scores)
+            else:
+                st.info("No Appeal Decision uploaded.")
+
+        with col2:
+            st.markdown("**Committee / Officer Report – Rulebook scores**")
+            if st.session_state["cr_scores"]:
+                st.json(st.session_state["cr_scores"])
+            else:
+                st.info("No Committee/Officer Report uploaded.")
+
+            st.markdown("**Aggregated X-variables used by later engines**")
+            st.json(st.session_state["doc_features"])
+
+        st.markdown("**Spin Index (difference between PS and CR)**")
+        spin_index = st.session_state["doc_features"].get("X10_Spin_Index", 0.0)
+        st.metric("X10 – Spin Index", f"{spin_index:.2f}")
+    else:
+        st.info("Upload documents and click the button to run Engine 0 & 1.")
+
+
+# =========================================================
+# TAB 2 – ENGINE 2: Context (Sliders)
+# =========================================================
+with tab_engine2:
+    st.header("Engine 2 – Context inputs")
+
+    st.markdown(
+        """
+        **Purpose**  
+        Engine 2 captures the planning context that is not directly in the documents, such as:
+        - Housing pressure  
+        - Tilted balance status  
+        - Local plan age  
+        - Committee attitude  
+        - Green Belt flag  
+        - Flood zone level
+        """
+    )
+
+    with st.form("context_form"):
+        housing_pressure = st.slider(
+            "Housing pressure (0 = low, 3 = very high)",
+            0.0,
+            3.0,
+            1.5,
+            0.5,
+        )
+
+        tb_status = st.select_slider(
+            "Tilted balance status",
+            options=[0, 1, 2],
+            value=1,
+            help="0 = Not engaged, 1 = Arguable, 2 = Clearly engaged",
+        )
+
+        plan_age = st.select_slider(
+            "Local plan age",
+            options=[0, 1, 2],
+            value=1,
+            help="0 = Up-to-date, 1 = Mid, 2 = Old / out-of-date",
+        )
+
+        committee_attitude = st.slider(
+            "Committee attitude (0 = very restrictive, 3 = very permissive)",
+            0.0,
+            3.0,
+            1.5,
+            0.5,
+        )
+
+        gb_flag = st.selectbox(
+            "Green Belt?",
+            options=[0, 1],
+            format_func=lambda x: "No" if x == 0 else "Yes",
+        )
+
+        floodzone_level = st.select_slider(
+            "Flood zone level",
+            options=[0, 1, 2, 3],
+            value=0,
+            help="0 = None / Zone 1, 2 = Zone 2, 3 = Zone 3",
+        )
+
+        submit_ctx = st.form_submit_button("Save Engine 2 context inputs")
+
+    if submit_ctx:
+        ctx_features = build_context_features(
+            housing_pressure=housing_pressure,
+            tb_status=tb_status,
+            plan_age=plan_age,
+            committee_attitude=committee_attitude,
+            gb_flag=gb_flag,
+            floodzone_level=floodzone_level,
+        )
+        st.session_state["ctx_features"] = ctx_features
+        st.success("Context inputs saved for this case.")
+
+    if st.session_state["ctx_features"] is not None:
+        st.subheader("Current Engine 2 context features")
+        st.json(st.session_state["ctx_features"])
+    else:
+        st.info("Set and save context inputs to use Engine 2.")
+
+
+# =========================================================
+# TAB 3 – ENGINE 3: Output (Prediction)
+# =========================================================
+with tab_engine3:
+    st.header("Engine 3 – Predictive output")
+
+    st.markdown(
+        """
+        **Purpose**  
+        Engine 3 combines:
+        - Engine 0 & 1 document variables (X1–X10)  
+        - Engine 2 context variables (X11–X16)  
+        - Interaction terms (Z-variables)  
+        
+        …into a logit-style model to estimate the probability of planning approval and
+        to show the contribution of each variable.
+        """
+    )
+
+    if st.session_state["doc_features"] is None:
+        st.error("Please run Engine 0 & 1 first (upload documents in the first tab).")
+    elif st.session_state["ctx_features"] is None:
+        st.error("Please set and save context inputs in Engine 2 tab.")
+    else:
+        run_engine3 = st.button("Run Engine 3 – Compute probability")
+        if run_engine3:
+            X_all = {}
+            X_all.update(st.session_state["doc_features"])
+            X_all.update(st.session_state["ctx_features"])
+
+            with st.spinner("Running Engine 3..."):
+                pred = predict_approval_probability(X_all)
+
+            st.session_state["prediction"] = pred
+            st.success("Engine 3 completed for this case.")
+
+        if st.session_state["prediction"] is not None:
+            pred = st.session_state["prediction"]
+            prob = pred["probability"]
+            rating = pred["rating"]
+
+            st.subheader("Overall risk result")
+
+            col_main, col_side = st.columns([2, 1])
+            with col_main:
+                st.metric(
+                    label="Predicted approval probability",
+                    value=f"{prob*100:.1f}%",
+                )
+                st.write(f"**Risk rating:** {rating}")
+
+                st.progress(min(max(prob, 0.01), 0.99))
+
+            with col_side:
+                st.markdown("**Linear score (Z_total)**")
+                st.write(f"{pred['linear_score']:.3f}")
+
+            st.markdown("---")
+            st.markdown("### Coefficients & contributions")
+
+            contrib_rows = pred.get("contributions", [])
+            if contrib_rows:
+                df_contrib = pd.DataFrame(contrib_rows)
+                df_contrib = df_contrib.sort_values(
+                    by="abs_contribution", ascending=False
+                )
+
+                st.write("Top drivers (by absolute contribution to Z_total):")
+                st.dataframe(
+                    df_contrib.head(12)[
+                        ["name", "type", "value", "coefficient", "contribution"]
+                    ]
+                )
+
+                with st.expander("Show all variables and contributions"):
+                    st.dataframe(
+                        df_contrib[
+                            ["name", "type", "value", "coefficient", "contribution"]
+                        ]
+                    )
+
+                st.caption(
+                    "Each row shows a variable, its coefficient, its current value for this case, "
+                    "and its contribution to the linear score Z_total (β × X)."
+                )
+            else:
+                st.info("No contribution table available from Engine 3 yet.")
+
+
+# =========================================================
+# TAB 4 – REPOSITORY / BATCH (Prototype)
+# =========================================================
+with tab_repo:
+    st.header("Repository / Batch processing (prototype)")
+
+    st.markdown(
+        """
+        **Purpose**  
+        This tab is the starting point for a future repository-based workflow:
+        - Upload multiple documents  
+        - Run Engine 0 & 1 in batch  
+        - Build a table of X-variables for many cases  
+        - (Later) attach outcomes and fit a real logistic regression model
+        
+        At the moment this tab only runs Engine 0 & 1 in batch and shows
+        the resulting feature table.
+        """
+    )
+
+    repo_files = st.file_uploader(
+        "Upload multiple Planning Statements to build a simple repository",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="repo_files",
+    )
+
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
+        run_batch = st.button("Run Engine 0 & 1 in batch for uploaded PDFs")
+    with col_btn2:
+        clear_repo = st.button("Clear repository table")
+
+    if clear_repo:
+        st.session_state["repo_df"] = None
+        st.success("Repository table cleared.")
+
+    if run_batch and repo_files:
+        all_rows = []
+        with st.spinner("Running Engine 0 & 1 in batch for all uploaded PDFs..."):
+            for f in repo_files:
+                text = extract_text_from_pdf(f)
+                scores = base_scores_from_text(text)
+                row = {
+                    "CaseID": f.name,
+                    **scores,
+                }
+                all_rows.append(row)
+
+        if all_rows:
+            df_repo = pd.DataFrame(all_rows)
+            st.session_state["repo_df"] = df_repo
+            st.success("Repository table updated from uploaded documents.")
+
+    if st.session_state["repo_df"] is not None:
+        st.subheader("Current repository (Engine 0 & 1 features per case)")
+        st.dataframe(st.session_state["repo_df"])
+        st.caption(
+            "This is a prototype repository. In a future stage, we could attach outcomes "
+            "and use this as the basis for a real data-trained logistic regression model."
+        )
+    else:
+        st.info("No repository table yet. Upload multiple PDFs and run the batch engine.")
+
